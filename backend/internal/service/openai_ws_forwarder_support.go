@@ -532,6 +532,7 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 	if s == nil {
 		return 0, nil, "", nil
 	}
+	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	responseID := strings.TrimSpace(previousResponseID)
 	if responseID == "" {
 		return 0, nil, "", nil
@@ -623,7 +624,7 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		if vetoed, _ := openAIProfitControlVetoReason(ctx, latest); vetoed {
 			return 0, nil, "", nil
 		}
-		if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel) {
+		if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel, requireCompact) {
 			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}

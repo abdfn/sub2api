@@ -100,6 +100,7 @@ const (
 	upstreamProtocolModeOpenAIH1         = "openai_h1"
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
+	upstreamProtocolModeOpenAIH1NoReuse  = "openai_h1_noreuse"
 	upstreamProtocolModeGrok             = "grok"
 )
 
@@ -215,8 +216,14 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
-	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := servertiming.Do(client, req)
+	var resp *http.Response
+	observer := service.OpenAICodexTicketEgressObserverFromContext(req.Context())
+	if profile == service.HTTPUpstreamProfileOpenAIHarvest && observer != nil && canTraceCodexTicketEgress(req) {
+		resp, err = doCodexTicketWithEgress(client, req, observer, codexTicketEgressTraceTimeout)
+	} else {
+		client = httpClientWithGrokAccessDeniedFallback(client)
+		resp, err = servertiming.Do(client, req)
+	}
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -1014,6 +1021,9 @@ func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamPr
 	if profile == service.HTTPUpstreamProfileGrok {
 		return upstreamProtocolModeGrok
 	}
+	if profile == service.HTTPUpstreamProfileOpenAIHarvest {
+		return upstreamProtocolModeOpenAIH1NoReuse
+	}
 	if profile != service.HTTPUpstreamProfileOpenAI {
 		return upstreamProtocolModeDefault
 	}
@@ -1345,6 +1355,13 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		}
 	case upstreamProtocolModeOpenAIH1:
 		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	case upstreamProtocolModeOpenAIH1NoReuse:
+		// Harvest must open a fresh CONNECT each attempt so the harvest proxy can rotate egress IPs.
+		transport.ForceAttemptHTTP2 = false
+		transport.DisableKeepAlives = true
+		transport.MaxIdleConns = 0
+		transport.MaxIdleConnsPerHost = 0
 		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	case upstreamProtocolModeOpenAIH1Fallback:
 		// 显式禁用 HTTP/2，确保代理不兼容场景回退到 HTTP/1.1。

@@ -493,6 +493,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { adminAPI } from '@/api/admin'
 import { useTableLoader } from '@/composables/useTableLoader'
+import { useAccountListRefresh } from '@/composables/useAccountListRefresh'
 import { useSwipeSelect, type SwipeSelectVirtualContext } from '@/composables/useSwipeSelect'
 import { useTableSelection } from '@/composables/useTableSelection'
 import { useStepUp, isStepUpBlocked, isStepUpCancelled, stepUpBlockReason } from '@/composables/useStepUp'
@@ -525,7 +526,7 @@ import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
-import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { hasCodexTicketHarvest, shouldReplaceAutoRefreshRow } from '@/utils/accountUsageRefresh'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -695,6 +696,8 @@ const autoRefreshIntervalSeconds = ref<(typeof autoRefreshIntervals)[number]>(30
 const autoRefreshCountdown = ref(0)
 const autoRefreshETag = ref<string | null>(null)
 const autoRefreshFetching = ref(false)
+const lastAccountListRefreshAt = ref(Date.now())
+let autoRefreshAbortController: AbortController | null = null
 const AUTO_REFRESH_SILENT_WINDOW_MS = 15000
 const autoRefreshSilentUntil = ref(0)
 const hasPendingListSync = ref(false)
@@ -1021,9 +1024,7 @@ const setAutoRefreshEnabled = (enabled: boolean) => {
   saveAutoRefreshToStorage()
   if (enabled) {
     autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-    resumeAutoRefresh()
   } else {
-    pauseAutoRefresh()
     autoRefreshCountdown.value = 0
   }
 }
@@ -1145,6 +1146,8 @@ useSwipeSelect(accountTableRef, {
 }, swipeVirtualContext)
 
 const resetAutoRefreshCache = () => {
+  autoRefreshAbortController?.abort()
+  lastAccountListRefreshAt.value = Date.now()
   autoRefreshETag.value = null
   upstreamBillingRateETag.value = null
 }
@@ -1328,6 +1331,7 @@ const handleSort = (key: string, order: AccountSortOrder) => {
 
 watch(loading, (isLoading, wasLoading) => {
   if (wasLoading && !isLoading) {
+    lastAccountListRefreshAt.value = Date.now()
     upstreamBillingNow.value = Date.now()
   }
   if (wasLoading && !isLoading && pendingTodayStatsRefresh.value) {
@@ -1378,26 +1382,6 @@ const enterAutoRefreshSilentWindow = () => {
   autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
 }
 
-const inAutoRefreshSilentWindow = () => {
-  return Date.now() < autoRefreshSilentUntil.value
-}
-
-const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
-  return (
-    current.updated_at !== next.updated_at ||
-    current.current_concurrency !== next.current_concurrency ||
-    current.current_window_cost !== next.current_window_cost ||
-    current.active_sessions !== next.active_sessions ||
-    current.schedulable !== next.schedulable ||
-    current.status !== next.status ||
-    current.rate_limit_reset_at !== next.rate_limit_reset_at ||
-    current.overload_until !== next.overload_until ||
-    current.temp_unschedulable_until !== next.temp_unschedulable_until ||
-    buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next) ||
-    buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next)
-  )
-}
-
 const syncAccountRefs = (nextAccount: Account) => {
   if (edAcc.value?.id === nextAccount.id) edAcc.value = nextAccount
   if (reAuthAcc.value?.id === nextAccount.id) reAuthAcc.value = nextAccount
@@ -1436,9 +1420,11 @@ const mergeAccountsIncrementally = (nextRows: Account[]) => {
   }
 }
 
-const refreshAccountsIncrementally = async () => {
-  if (autoRefreshFetching.value) return
+const refreshAccountsIncrementally = async (options: AccountLoadOptions = {}) => {
+  if (loading.value || autoRefreshFetching.value) return
   syncAccountListDerivedParams()
+  const controller = new AbortController()
+  autoRefreshAbortController = controller
   autoRefreshFetching.value = true
   try {
     const result = await adminAPI.accounts.listWithEtag(
@@ -1455,9 +1441,12 @@ const refreshAccountsIncrementally = async () => {
         sort_order?: AccountSortOrder
 
       },
-      { etag: autoRefreshETag.value }
+      { etag: autoRefreshETag.value, signal: controller.signal }
     )
 
+    // A manual reload or an editor opened during the request supersedes this
+    // snapshot. Keep both the row and its ETag unchanged until the next poll.
+    if (controller.signal.aborted || loading.value || isAnyModalOpen.value || menu.show || document.hidden) return
     if (result.etag) {
       autoRefreshETag.value = result.etag
     }
@@ -1469,10 +1458,11 @@ const refreshAccountsIncrementally = async () => {
     }
     upstreamBillingNow.value = Date.now()
 
-    await refreshTodayStatsBatch()
+    if (options.refreshTodayStats !== false) await refreshTodayStatsBatch()
   } catch (error) {
-    console.error('Auto refresh failed:', error)
+    if (!controller.signal.aborted) console.error('Auto refresh failed:', error)
   } finally {
+    if (autoRefreshAbortController === controller) autoRefreshAbortController = null
     autoRefreshFetching.value = false
   }
 }
@@ -1547,32 +1537,21 @@ const syncPendingListChanges = async () => {
   usageManualRefreshToken.value += 1
 }
 
-const { pause: pauseAutoRefresh, resume: resumeAutoRefresh } = useIntervalFn(
-  async () => {
-    if (!autoRefreshEnabled.value) return
-    if (document.hidden) return
-    if (loading.value || autoRefreshFetching.value) return
-    if (isAnyModalOpen.value) return
-    if (menu.show || showAccountToolsDropdown.value || showAutoRefreshDropdown.value) return
-    if (inAutoRefreshSilentWindow()) {
-      autoRefreshCountdown.value = Math.max(
-        0,
-        Math.ceil((autoRefreshSilentUntil.value - Date.now()) / 1000)
-      )
-      return
-    }
+const ticketPollingEnabled = computed(() => (
+  !hiddenColumns.has('usage') && accounts.value.some(hasCodexTicketHarvest)
+))
 
-    if (autoRefreshCountdown.value <= 0) {
-      autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-      await refreshAccountsIncrementally()
-      return
-    }
-
-    autoRefreshCountdown.value -= 1
-  },
-  1000,
-  { immediate: false }
-)
+useAccountListRefresh({
+  autoEnabled: autoRefreshEnabled,
+  autoIntervalSeconds: autoRefreshIntervalSeconds,
+  autoCountdown: autoRefreshCountdown,
+  ticketPollingEnabled,
+  silentUntil: autoRefreshSilentUntil,
+  lastRefreshAt: lastAccountListRefreshAt,
+  isBlocked: () => loading.value || autoRefreshFetching.value || isAnyModalOpen.value ||
+    menu.show || showAccountToolsDropdown.value || showAutoRefreshDropdown.value,
+  refresh: refreshAccountsIncrementally
+})
 
 const GROK_QUOTA_SIGNAL_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const GROK_QUOTA_SIGNAL_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
@@ -2554,13 +2533,11 @@ onMounted(async () => {
 
   if (autoRefreshEnabled.value) {
     autoRefreshCountdown.value = autoRefreshIntervalSeconds.value
-    resumeAutoRefresh()
-  } else {
-    pauseAutoRefresh()
   }
 })
 
 onUnmounted(() => {
+  autoRefreshAbortController?.abort()
   upstreamBillingRateAbortController?.abort()
   if (usageBatchFlushTimer !== null) {
     clearTimeout(usageBatchFlushTimer)

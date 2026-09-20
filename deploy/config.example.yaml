@@ -311,6 +311,50 @@ gateway:
   # Use this to avoid compact failures when newer models are not yet supported by the compact endpoint.
   # 当 compact 端点暂未支持更新模型时，可通过这里降级规避失败。
   openai_compact_model: "gpt-5.5"
+  # ChatGPT OAuth Codex ticket: harvest a Personal 292 / Team 332 x-codex-turn-state header via a
+  # dedicated HTTP(S)/SOCKS proxy, store it for ttl_seconds (default 3600), then inject
+  # it on residential-IP production requests. Off by default.
+  # ChatGPT OAuth Codex 门票：用独立 HTTP(S)/SOCKS 代理打到个人 292 / Team 332 长度的 x-codex-turn-state，默认缓存 1 小时，
+  # 再在住宅 IP 业务请求中覆盖该头。默认关闭。
+  # Env: GATEWAY_OPENAI_CODEX_TICKET_ENABLED=true
+  #      GATEWAY_OPENAI_CODEX_TICKET_HARVEST_PROXY_URL=socks5h://user:pass@host:port
+  # Admin UI 开关（系统设置 → 网关 → Codex 设置 → Codex 门票）可覆盖 enabled，无需重启。
+  # Off: do not harvest or inject. On: harvest in the background and inject on production requests.
+  # The harvest proxy should rotate egress IPs itself (fresh CONNECT per attempt).
+  # Log egress IP: an anonymous /cdn-cgi/trace request and the ticket POST share
+  # one connection within that attempt. Trace failures and connection changes are
+  # recorded separately; click the red Failed label in the egress IP column for details.
+  # 出口 IP 仅在同一连接的匿名 trace 检测与打票请求核对一致时记录。
+  # 探测失败会单独记录原因；点击出口 IP 列的红色“失败”可查看详情。
+  # Trace waits up to 10 seconds and is skipped when 20 seconds or less remain
+  # in the attempt timeout, reserving at least half the remaining time for the ticket.
+  # 出口探测最多等待 10 秒；打票剩余时限不超过 20 秒时跳过探测并记录原因，
+  # 为实际打票请求保留至少一半的剩余时间。
+  # Log countries are looked up asynchronously via https://api.country.is/{ip}
+  # directly from this server (no harvest/environment proxy), cached per IP for 24h.
+  # Country.is requires no key and has no daily quota; its public service limits each IP
+  # to 10 requests/second. This client uses at most 8/second and backs off on 429.
+  # 打开日志时异步查国家，服务器直连 Country.is，仅发送出口 IP；查询失败不影响打票。
+  # API policy/data sources: https://country.is/ (MaxMind GeoLite2, updated daily).
+  # Credential shadow accounts retain their existing forwarding policy and are not ticket-gated.
+  openai_codex_ticket:
+    enabled: false
+    target_length: 292
+    ttl_seconds: 3600
+    refresh_before_seconds: 600
+    # 后台「系统设置 → 网关 → Codex 设置」可覆盖此值，无需重启。
+    # 后台值的读取缓存为 5 秒，下个探测周期使用新代理；代理服务商自行负责轮换 IP。
+    harvest_proxy_url: ""
+    harvest_probe_interval_seconds: 6
+    harvest_attempt_timeout_seconds: 25
+    # 打票返回 401 时停止该账号所有模型的打票，并将账号设为已有的错误状态。
+    # 提示“令牌失效，已停止打票”；更换令牌并恢复账号状态后可继续。
+    # 打票返回 429 且 5h/7d 用量达到 100% 时停止该账号打票；额度恢复后自动继续。
+    # 此期间豁免缺票拦截和用量预暂停，业务请求仍可使用账号，并按真实上游响应进入限流。
+    fail_closed: true
+    models:
+      - gpt-6-astra
+      - gpt-5.6-sol
   # ChatGPT Frameless Live 单会话硬上限（秒）。
   live:
     max_session_duration_seconds: 3600

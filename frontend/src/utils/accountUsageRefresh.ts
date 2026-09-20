@@ -69,3 +69,26 @@ export const buildGrokUsageRefreshKey = (account: Pick<Account, 'platform' | 'ex
     serializeSnapshotRefreshValue(legacyQuotaFallback)
   ].join('|')
 }
+
+// hasCodexTicketHarvest 判断账号是否需要自动刷新打票状态
+export const hasCodexTicketHarvest = (account: Account): boolean => (
+  account.platform === 'openai' &&
+  (account.type === 'oauth' || account.type === 'setup-token') &&
+  account.codex_turn_tickets?.some((ticket) => ticket.harvest_enabled === true) === true
+)
+
+// shouldReplaceAutoRefreshRow 比较账号运行状态和门票快照以决定是否更新列表行
+export const shouldReplaceAutoRefreshRow = (current: Account, next: Account): boolean => (
+  current.updated_at !== next.updated_at ||
+  current.current_concurrency !== next.current_concurrency ||
+  current.current_window_cost !== next.current_window_cost ||
+  current.active_sessions !== next.active_sessions ||
+  current.schedulable !== next.schedulable ||
+  current.status !== next.status ||
+  current.rate_limit_reset_at !== next.rate_limit_reset_at ||
+  current.overload_until !== next.overload_until ||
+  current.temp_unschedulable_until !== next.temp_unschedulable_until ||
+  buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next) ||
+  buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next) ||
+  serializeSnapshotRefreshValue(current.codex_turn_tickets) !== serializeSnapshotRefreshValue(next.codex_turn_tickets)
+)

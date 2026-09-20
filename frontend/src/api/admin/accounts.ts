@@ -19,6 +19,7 @@ import type {
   AdminDataImportResult,
   CodexSessionImportRequest,
   CodexSessionImportResult,
+  CodexTicketLogsResponse,
   OpenAICodexPATCreateRequest,
   CheckMixedChannelRequest,
   CheckMixedChannelResponse,
@@ -385,6 +386,19 @@ export async function getUsage(id: number, source?: 'passive' | 'active', force?
 export interface BatchAccountUsageResponse {
   usage: Record<string, AccountUsageInfo>
   errors: Record<string, string>
+}
+
+// getCodexTicketLogs 读取指定账号和模型的打票日志，并支持取消请求
+export async function getCodexTicketLogs(
+  id: number,
+  model: string,
+  options?: { signal?: AbortSignal }
+): Promise<CodexTicketLogsResponse> {
+  const { data } = await apiClient.get<CodexTicketLogsResponse>(`/admin/accounts/${id}/codex-ticket-logs`, {
+    params: { model },
+    signal: options?.signal
+  })
+  return data
 }
 
 export async function getBatchUsage(accountIds: number[], force?: boolean): Promise<BatchAccountUsageResponse> {
@@ -1090,6 +1104,7 @@ export const accountsAPI = {
   getStats,
   clearError,
   getUsage,
+  getCodexTicketLogs,
   getBatchUsage,
   getTodayStats,
   getBatchTodayStats,

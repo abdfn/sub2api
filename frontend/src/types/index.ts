@@ -1168,6 +1168,20 @@ export interface Account {
   credentials?: Record<string, unknown>
   credentials_status?: Record<string, boolean>
   ollama_cloud_usage?: OllamaCloudUsageState
+  codex_turn_tickets?: Array<{
+    model: string
+    length?: number
+    ready: boolean
+    remaining_seconds: number
+    blocked: boolean
+    expires_at?: string
+    harvest_enabled?: boolean
+    harvest_paused?: boolean
+    token_invalid?: boolean
+    attempts?: number
+    harvesting?: boolean
+    next_harvest_at?: string
+  }>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {
     model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
@@ -1292,6 +1306,31 @@ export interface Account {
   parent_privacy_mode?: string
   parent_subscription_expires_at?: string
   parent_chatgpt_account_id?: string
+}
+
+export interface CodexTicketLogEntry {
+  id: number
+  time: string
+  attempt: number
+  event: 'started' | 'success' | 'miss' | 'error' | 'skipped'
+  reason: string
+  http_status?: number
+  egress_ip?: string
+  egress_country_code?: string
+  egress_error?: {
+    reason: string
+    http_status?: number
+  }
+  ticket_length?: number
+  target_length: number
+  duration_ms?: number
+}
+
+export interface CodexTicketLogsResponse {
+  model: string
+  entries: CodexTicketLogEntry[]
+  status: NonNullable<Account['codex_turn_tickets']>[number] | null
+  limit: number
 }
 
 // The admin account list may return this compact shape when lite=1. Detail

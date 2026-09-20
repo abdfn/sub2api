@@ -116,8 +116,55 @@
       </div>
     </template>
 
-    <!-- OpenAI OAuth accounts: single source from /usage API -->
-    <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
+    <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
+    <template v-else-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token')">
+      <div v-if="codexTurnTickets.length" class="mb-1 space-y-0.5">
+        <div
+          v-for="ticket in codexTurnTickets"
+          :key="ticket.model"
+          class="text-[10px] leading-4"
+        >
+          <div class="flex items-center gap-1">
+            <span class="w-8 shrink-0 truncate font-medium text-gray-500 dark:text-gray-400" :title="ticket.model">{{ shortCodexTicketModel(ticket.model) }}</span>
+            <button
+              type="button"
+              class="rounded text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50"
+              :class="ticket.token_invalid ? 'text-red-600 dark:text-red-400' : ticket.rate_limited ? 'text-amber-600 dark:text-amber-400' : ticket.ready ? 'w-14 shrink-0 whitespace-nowrap tabular-nums text-emerald-600 dark:text-emerald-400' : ticket.blocked ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500'"
+              :title="t('admin.accounts.openai.codexTicketLogs.view', { model: ticket.model })"
+              :aria-label="t('admin.accounts.openai.codexTicketLogs.view', { model: ticket.model })"
+              @click.stop="codexTicketLogModel = ticket.model"
+            >
+              {{ ticket.token_invalid ? t('admin.accounts.openai.codexTurnTicketTokenInvalid') : ticket.rate_limited ? t('admin.accounts.openai.codexTurnTicketRateLimited') : ticket.ready ? formatCodexTicketRemaining(ticket.remaining_seconds) : ticket.blocked ? t('admin.accounts.openai.codexTurnTicketPaused') : t('admin.accounts.openai.codexTurnTicketMissing') }}
+            </button>
+            <button
+              v-if="ticket.harvest_enabled || ticket.harvest_paused || ticket.token_invalid"
+              type="button"
+              class="ml-1 shrink-0 whitespace-nowrap rounded text-left tabular-nums text-gray-500 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 dark:text-gray-400"
+              :title="t('admin.accounts.openai.codexTurnTicketAttemptsHint')"
+              :aria-label="t('admin.accounts.openai.codexTicketLogs.viewAttempts', { model: ticket.model, count: ticket.attempts })"
+              @click.stop="codexTicketLogModel = ticket.model"
+            >{{ t('admin.accounts.openai.codexTurnTicketAttempts', { count: ticket.attempts }) }}</button>
+          </div>
+          <div
+            v-if="!ticket.token_invalid && (ticket.harvest_paused || (ticket.harvest_enabled && !ticket.ready && !ticket.rate_limited))"
+            class="flex flex-wrap items-center gap-x-2 text-gray-500 dark:text-gray-400"
+          >
+            <span v-if="ticket.harvest_paused">{{ t('admin.accounts.openai.codexTurnTicketHarvestPaused') }}</span>
+            <template v-else-if="!ticket.ready && !ticket.rate_limited">
+              <span v-if="ticket.harvesting" class="text-blue-600 dark:text-blue-400">{{ t('admin.accounts.openai.codexTurnTicketHarvesting') }}</span>
+              <span v-else-if="ticket.retry_remaining_seconds > 0" class="tabular-nums">{{ t('admin.accounts.openai.codexTurnTicketNextHarvest', { time: formatCodexHarvestCountdown(ticket.retry_remaining_seconds) }) }}</span>
+              <span v-else>{{ t('admin.accounts.openai.codexTurnTicketWaiting') }}</span>
+            </template>
+          </div>
+        </div>
+      </div>
+      <CodexTicketLogsDialog
+        v-if="codexTicketLogModel"
+        :show="true"
+        :account="account"
+        :model="codexTicketLogModel"
+        @close="codexTicketLogModel = null"
+      />
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
         <UsageProgressBar
           v-if="usageInfo?.five_hour"
@@ -186,6 +233,7 @@
         <div class="text-xs text-gray-400">-</div>
         <!-- Always allow on-demand upstream quota query, even before local data exists. -->
         <OpenAIQuotaResetCell
+          v-if="account.type === 'oauth'"
           :account="account"
           class="mt-1"
           @account-updated="handleQuotaResetAccountUpdated"
@@ -648,15 +696,18 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'vue'
+import { useIntervalFn } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { isCodexTicketRateLimited } from '@/utils/codexTicketStatus'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
+import CodexTicketLogsDialog from './CodexTicketLogsDialog.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
@@ -696,6 +747,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const desktopViewportQuery = '(min-width: 768px)'
+const codexTicketLogModel = ref<string | null>(null)
 
 const unmounted = ref(false)
 onBeforeUnmount(() => { unmounted.value = true })
@@ -786,6 +838,60 @@ const hasOpenAIUsageFallback = computed(() => {
   if (props.account.platform !== 'openai' || props.account.type !== 'oauth') return false
   return !!usageInfo.value?.five_hour || !!usageInfo.value?.seven_day
 })
+
+const codexTicketNow = ref(Date.now())
+const codexTicketSnapshotAt = ref(codexTicketNow.value)
+const { pause: pauseCodexTicketClock, resume: resumeCodexTicketClock } = useIntervalFn(
+  () => { codexTicketNow.value = Date.now() },
+  1000,
+  { immediate: false }
+)
+watch(() => props.account.codex_turn_tickets, (tickets) => {
+  codexTicketNow.value = Date.now()
+  codexTicketSnapshotAt.value = codexTicketNow.value
+  if (tickets?.length) resumeCodexTicketClock()
+  else pauseCodexTicketClock()
+}, { immediate: true, deep: true })
+
+// secondsUntilCodexTicketTime 计算门票截止时间距离当前时间的剩余秒数
+function secondsUntilCodexTicketTime(value?: string): number | null {
+  const deadline = value ? Date.parse(value) : NaN
+  if (!Number.isFinite(deadline)) return null
+  return Math.max(0, Math.ceil((deadline - codexTicketNow.value) / 1000))
+}
+
+const codexTurnTickets = computed(() => (props.account.codex_turn_tickets ?? []).map((ticket) => {
+  const elapsed = Math.max(0, Math.floor((codexTicketNow.value - codexTicketSnapshotAt.value) / 1000))
+  const remaining = Number.isFinite(ticket.remaining_seconds) ? ticket.remaining_seconds : 0
+  return {
+    ...ticket,
+    rate_limited: isCodexTicketRateLimited(props.account, ticket.model, codexTicketNow.value),
+    attempts: Number.isFinite(ticket.attempts) ? Math.max(0, Math.floor(ticket.attempts!)) : 0,
+    remaining_seconds: secondsUntilCodexTicketTime(ticket.expires_at) ?? Math.max(0, remaining - elapsed),
+    retry_remaining_seconds: secondsUntilCodexTicketTime(ticket.next_harvest_at) ?? 0
+  }
+}))
+
+// shortCodexTicketModel 将常用门票模型名称转换为紧凑标签
+function shortCodexTicketModel(model: string) {
+  if (model === 'gpt-6-astra') return 'astra'
+  if (model === 'gpt-5.6-sol') return 'sol'
+  return model
+}
+
+// formatCodexTicketRemaining 将门票剩余秒数格式化为分秒文本
+function formatCodexTicketRemaining(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds || 0))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}m${String(s).padStart(2, '0')}s`
+}
+
+// formatCodexHarvestCountdown 将下一轮采票等待时间格式化为倒计时
+function formatCodexHarvestCountdown(seconds: number) {
+  const minutes = Math.floor(seconds / 60)
+  return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}
 
 const openAISevenDayEstimatedTotalCost = computed(() => {
   const sevenDay = usageInfo.value?.seven_day
